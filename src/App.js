@@ -2,8 +2,18 @@ import React, { useState, useEffect, useMemo, useRef } from 'react';
 import { 
   Search, Laptop, ChevronDown, ChevronUp, AlertTriangle, 
   Loader2, CreditCard, Copy, Share2, ServerCrash, 
-  CheckCircle2, Circle, SlidersHorizontal, X, Tag
+  CheckCircle2, Circle, SlidersHorizontal, X, Tag, Filter, RefreshCw
 } from 'lucide-react';
+import { initializeApp } from 'firebase/app';
+import { getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged } from 'firebase/auth';
+import { getFirestore, doc, setDoc, getDoc } from 'firebase/firestore';
+
+// --- Firebase Configuration ---
+const firebaseConfig = JSON.parse(__firebase_config);
+const app = initializeApp(firebaseConfig);
+const auth = getAuth(app);
+const db = getFirestore(app);
+const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
 
 // --- Utility Functions ---
 
@@ -13,488 +23,371 @@ const parseCSV = (csvText) => {
   let currentRow = [];
   let currentCell = '';
   let insideQuotes = false;
-
   for (let i = 0; i < csvText.length; i++) {
     const char = csvText[i];
     const nextChar = csvText[i + 1];
-
     if (char === '"') {
-      if (insideQuotes && nextChar === '"') {
-        currentCell += '"';
-        i++;
-      } else {
-        insideQuotes = !insideQuotes;
-      }
-    } else if (char === ',' && !insideQuotes) {
-      currentRow.push(currentCell.trim());
-      currentCell = '';
-    } else if ((char === '\n' || (char === '\r' && nextChar === '\n')) && !insideQuotes) {
+      if (insideQuotes && nextChar === '"') { currentCell += '"'; i++; } 
+      else { insideQuotes = !insideQuotes; }
+    } else if (char === ',' && !insideQuotes) { currentRow.push(currentCell.trim()); currentCell = ''; } 
+    else if ((char === '\n' || (char === '\r' && nextChar === '\n')) && !insideQuotes) {
       if (char === '\r') i++;
-      currentRow.push(currentCell.trim());
-      rows.push(currentRow);
-      currentRow = [];
-      currentCell = '';
-    } else {
-      currentCell += char;
-    }
+      currentRow.push(currentCell.trim()); rows.push(currentRow); currentRow = []; currentCell = '';
+    } else { currentCell += char; }
   }
-  if (currentCell || csvText[csvText.length - 1] === ',') {
-    currentRow.push(currentCell.trim());
-  }
-  if (currentRow.length > 0) {
-    rows.push(currentRow);
-  }
+  if (currentCell || csvText[csvText.length - 1] === ',') { currentRow.push(currentCell.trim()); }
+  if (currentRow.length > 0) { rows.push(currentRow); }
   return rows;
 };
 
 const parsePrice = (priceStr) => {
   if (!priceStr || typeof priceStr !== 'string') return 0;
-  const numStr = priceStr.replace(/[^0-9]/g, '');
-  const num = parseInt(numStr, 10);
+  const num = parseInt(priceStr.replace(/[^0-9]/g, ''), 10);
   return isNaN(num) ? 0 : num;
 };
 
-const formatINR = (num) => {
-  if (num === 0 || isNaN(num)) return 'N/A';
-  return num.toLocaleString('en-IN');
-};
+const formatINR = (num) => (num === 0 || isNaN(num)) ? 'N/A' : num.toLocaleString('en-IN');
 
-const cleanHeaderName = (headerStr) => {
-  if (!headerStr) return '';
-  return headerStr.replace(/^\(\s*[A-Za-z]\s*\)\s*/, '').trim();
-};
+const cleanHeaderName = (headerStr) => headerStr ? headerStr.replace(/^\(\s*[A-Za-z]\s*\)\s*/, '').trim() : '';
 
-const copyToClipboard = (text, message = 'Copied!') => {
+const copyToClipboard = (text, callback) => {
   const textArea = document.createElement("textarea");
   textArea.value = text;
-  textArea.style.position = "fixed";
-  textArea.style.left = "-9999px";
-  textArea.style.top = "0";
+  textArea.style.position = "fixed"; textArea.style.left = "-9999px";
   document.body.appendChild(textArea);
-  textArea.focus();
-  textArea.select();
-  try {
-    const successful = document.execCommand('copy');
-    if (successful) alert(message);
-  } catch (err) {
-    console.error('Copy failed', err);
-  }
+  textArea.focus(); textArea.select();
+  try { if (document.execCommand('copy') && callback) callback(); } catch (err) { console.error(err); }
   document.body.removeChild(textArea);
 };
 
 export default function App() {
   const [data, setData] = useState([]);
   const [loading, setLoading] = useState(true);
+  const [refreshing, setRefreshing] = useState(false);
   const [error, setError] = useState(null);
+  const [toast, setToast] = useState(null);
+  const [user, setUser] = useState(null);
+  const [lastUpdated, setLastUpdated] = useState(null);
   
   const [searchTerm, setSearchTerm] = useState('');
   const [showFilters, setShowFilters] = useState(false);
   const [activeCategory, setActiveCategory] = useState('All');
-  const [filters, setFilters] = useState({ ram: '', ssd: '', displaySize: '', displayType: '' });
+  const [filters, setFilters] = useState({ ram: '', ssd: '', displaySize: '', displayType: '', processor: '' });
 
-  // Security Logic (F12 protection)
+  const showToast = (message) => { setToast(message); setTimeout(() => setToast(null), 2000); };
+
+  // Rule 3: Auth first
+  useEffect(() => {
+    const initAuth = async () => {
+      try {
+        if (typeof __initial_auth_token !== 'undefined' && __initial_auth_token) { 
+          await signInWithCustomToken(auth, __initial_auth_token); 
+        } else { 
+          await signInAnonymously(auth); 
+        }
+      } catch (err) { console.error("Auth Error:", err); }
+    };
+    initAuth();
+    const unsubscribe = onAuthStateChanged(auth, setUser);
+    return () => unsubscribe();
+  }, []);
+
+  // UI Protection
   useEffect(() => {
     const handleContextMenu = (e) => e.preventDefault();
     const handleKeyDown = (e) => {
-      if (e.keyCode === 123) e.preventDefault();
-      if (e.ctrlKey && e.shiftKey && (e.keyCode === 73 || e.keyCode === 74 || e.keyCode === 67)) e.preventDefault();
-      if (e.ctrlKey && e.keyCode === 85) e.preventDefault();
+      if (e.keyCode === 123 || (e.ctrlKey && e.shiftKey && [73, 74, 67].includes(e.keyCode)) || (e.ctrlKey && e.keyCode === 85)) e.preventDefault();
     };
-
     const meta = document.createElement('meta');
-    meta.name = "viewport";
-    meta.content = "width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no";
+    meta.name = "viewport"; meta.content = "width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no";
     document.getElementsByTagName('head')[0].appendChild(meta);
-
     document.addEventListener('contextmenu', handleContextMenu);
     document.addEventListener('keydown', handleKeyDown);
-
-    return () => {
-      document.removeEventListener('contextmenu', handleContextMenu);
-      document.removeEventListener('keydown', handleKeyDown);
-    };
+    return () => { document.removeEventListener('contextmenu', handleContextMenu); document.removeEventListener('keydown', handleKeyDown); };
   }, []);
 
-  // Fetch Data logic
-  useEffect(() => {
-    const fetchSheetData = async () => {
-      const sheetCSVUrl = 'https://docs.google.com/spreadsheets/d/122AONXEgWNyc4EnWupTeLMwrLbbXsFy2/export?format=csv&gid=1160082038';
-      try {
-        const response = await fetch(sheetCSVUrl);
-        if (!response.ok) throw new Error('Network error');
-        const text = await response.text();
-        const rows = parseCSV(text);
-        if (rows.length > 1) {
-          const headers = rows[0] || [];
-          const jsonData = rows.slice(1).map(row => {
-            let obj = {};
-            headers.forEach((header, i) => {
-              if (i >= 1 && i <= 26 && i !== 5 && i !== 7 && i !== 9) {
-                const keyName = cleanHeaderName((header || `Column_${i}`).trim()); 
-                obj[keyName] = row[i] ? row[i].trim() : '';
-              }
-            });
-            return obj;
+  const syncData = async (isManual = false) => {
+    if (!auth.currentUser) return;
+    if (isManual) setRefreshing(true); else setLoading(true);
+    
+    // Rule 1: Strict Paths
+    const cacheDocRef = doc(db, 'artifacts', appId, 'public', 'data', 'inventoryCache', 'latest');
+    
+    try {
+      const response = await fetch('https://docs.google.com/spreadsheets/d/122AONXEgWNyc4EnWupTeLMwrLbbXsFy2/export?format=csv&gid=1160082038');
+      const text = await response.text();
+      const rows = parseCSV(text);
+      if (rows.length > 1) {
+        const headers = rows[0] || [];
+        const jsonData = rows.slice(1).map(row => {
+          let obj = {};
+          headers.forEach((header, i) => {
+            if (i >= 1 && i <= 26 && ![5, 7, 9].includes(i)) {
+              const key = cleanHeaderName(header);
+              if (key) obj[key] = row[i] ? row[i].trim() : '';
+            }
           });
-          setData(jsonData.filter(item => item['Marketing Name'] || item['SKU CODE']));
-        }
-      } catch (err) {
-        setError(err.message);
-      } finally {
-        setLoading(false);
+          return obj;
+        });
+        const validData = jsonData.filter(item => item['Marketing Name'] || item['SKU CODE']);
+        
+        await setDoc(cacheDocRef, { data: JSON.stringify(validData), timestamp: new Date().toISOString() });
+        setData(validData);
+        setLastUpdated(new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }));
+        if (isManual) showToast('Inventory Refreshed');
+        setError(null);
       }
-    };
-    fetchSheetData();
-  }, []);
+    } catch (err) {
+      const cacheSnap = await getDoc(cacheDocRef);
+      if (cacheSnap.exists()) {
+        const cached = cacheSnap.data();
+        setData(JSON.parse(cached.data));
+        setLastUpdated(new Date(cached.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }));
+        showToast('Using Offline Cache');
+        setError(null);
+      } else { setError('Connection failed.'); }
+    } finally { setLoading(false); setRefreshing(false); }
+  };
 
-  // Dynamic Series Detection
+  useEffect(() => { if (user) syncData(); }, [user]);
+
   const modelCategories = useMemo(() => {
     if (!Array.isArray(data)) return [];
-    const seriesSet = new Set();
+    const series = new Set();
     data.forEach(item => {
-      const name = String(item['Marketing Name'] || item['Model'] || '');
-      const match = name.match(/book\s*(\d+)/i);
-      if (match) {
-        seriesSet.add(`Book ${match[1]}`);
-      }
+      const match = (item['Marketing Name'] || '').match(/book\s*(\d+)/i);
+      if (match) series.add(`Book ${match[1]}`);
     });
-    return Array.from(seriesSet).sort((a, b) => {
-      const numA = parseInt(a.match(/\d+/)[0]);
-      const numB = parseInt(b.match(/\d+/)[0]);
-      return numB - numA;
-    });
+    return Array.from(series).sort((a, b) => parseInt(b.match(/\d+/)[0]) - parseInt(a.match(/\d+/)[0]));
   }, [data]);
 
-  // Dynamic Filters
   const filterOptions = useMemo(() => {
-    const options = { ram: new Set(), ssd: new Set(), displaySize: new Set(), displayType: new Set() };
+    const opts = { ram: new Set(), ssd: new Set(), displaySize: new Set(), displayType: new Set(), processor: new Set() };
     data.forEach(item => {
-      const ramKey = Object.keys(item).find(k => k.toLowerCase() === 'ram' || k.toLowerCase() === 'memory');
-      const ssdKey = Object.keys(item).find(k => k.toLowerCase() === 'ssd' || k.toLowerCase() === 'storage');
-      const dSizeKey = Object.keys(item).find(k => k.toLowerCase().includes('display size'));
-      const dTypeKey = Object.keys(item).find(k => k === 'Display' || k.toLowerCase().includes('display type'));
-      if (ramKey && item[ramKey] && item[ramKey] !== 'N/A') options.ram.add(item[ramKey]);
-      if (ssdKey && item[ssdKey] && item[ssdKey] !== 'N/A') options.ssd.add(item[ssdKey]);
-      if (dSizeKey && item[dSizeKey] && item[dSizeKey] !== 'N/A') options.displaySize.add(item[dSizeKey]);
-      if (dTypeKey && item[dTypeKey] && item[dTypeKey] !== 'N/A') options.displayType.add(item[dTypeKey]);
+      const getVal = (keys) => {
+        const key = Object.keys(item).find(k => keys.some(sk => k.toLowerCase().includes(sk)));
+        return item[key];
+      };
+      const r = getVal(['ram', 'memory']), s = getVal(['ssd', 'storage']), ds = getVal(['display size']), dt = getVal(['display type', 'screen type']), p = getVal(['processor', 'cpu']);
+      if (r && r !== 'N/A') opts.ram.add(r); if (s && s !== 'N/A') opts.ssd.add(s); if (ds && ds !== 'N/A') opts.displaySize.add(ds); if (dt && dt !== 'N/A') opts.displayType.add(dt); if (p && p !== 'N/A') opts.processor.add(p);
     });
-    return { 
-      ram: [...options.ram].sort(), 
-      ssd: [...options.ssd].sort(), 
-      displaySize: [...options.displaySize].sort(), 
-      displayType: [...options.displayType].sort() 
-    };
+    return { ram: [...opts.ram].sort(), ssd: [...opts.ssd].sort(), displaySize: [...opts.displaySize].sort(), displayType: [...opts.displayType].sort(), processor: [...opts.processor].sort() };
   }, [data]);
 
   const processedData = useMemo(() => {
-    return data.filter(item => {
-      const searchableString = Object.values(item).join(' ').toLowerCase();
-      const searchWords = searchTerm.toLowerCase().trim().split(/\s+/).filter(Boolean);
-      const searchMatch = searchWords.every(word => searchableString.includes(word));
-      
-      let catMatch = true;
-      if (activeCategory !== 'All') {
-        const itemNameNormalized = (item['Marketing Name'] || '').toLowerCase().replace(/\s+/g, '');
-        const activeCatNormalized = activeCategory.toLowerCase().replace(/\s+/g, '');
-        catMatch = itemNameNormalized.includes(activeCatNormalized);
-      }
-      
-      const ramKey = Object.keys(item).find(k => k.toLowerCase() === 'ram' || k.toLowerCase() === 'memory');
-      const ssdKey = Object.keys(item).find(k => k.toLowerCase() === 'ssd' || k.toLowerCase() === 'storage');
-      const dSizeKey = Object.keys(item).find(k => k.toLowerCase().includes('display size'));
-      const dTypeKey = Object.keys(item).find(k => k === 'Display' || k.toLowerCase().includes('display type'));
+    const query = searchTerm.toLowerCase().trim();
+    const queryNoSpaces = query.replace(/\s+/g, '');
 
-      return searchMatch && catMatch && 
-             (!filters.ram || item[ramKey] === filters.ram) && 
-             (!filters.ssd || item[ssdKey] === filters.ssd) && 
-             (!filters.displaySize || item[dSizeKey] === filters.displaySize) && 
-             (!filters.displayType || item[dTypeKey] === filters.displayType);
+    return data.filter(item => {
+      const name = (item['Marketing Name'] || '').toLowerCase();
+      const sku = (item['SKU CODE'] || '').toLowerCase();
+      const model = (item['Model'] || '').toLowerCase();
+
+      // STRICT EXACT SEARCH
+      if (query) {
+        const isExactMatch = name.includes(query) || sku.includes(query) || model.includes(query);
+        const nameNoSpace = name.replace(/\s+/g, '');
+        const isNormalizedMatch = nameNoSpace.includes(queryNoSpaces);
+        if (!isExactMatch && !isNormalizedMatch) return false;
+      }
+
+      // STRICT CATEGORY TAB
+      if (activeCategory !== 'All') {
+        const catNum = activeCategory.match(/\d+/)[0];
+        const nameNormalized = name.replace(/\s+/g, '');
+        if (!nameNormalized.includes(`book${catNum}`)) return false;
+      }
+
+      // FILTERS
+      const checkFilter = (val, keys) => {
+        if (!val) return true;
+        const key = Object.keys(item).find(k => keys.some(sk => k.toLowerCase().includes(sk)));
+        return item[key] === val;
+      };
+
+      return checkFilter(filters.ram, ['ram', 'memory']) &&
+             checkFilter(filters.ssd, ['ssd', 'storage']) &&
+             checkFilter(filters.displaySize, ['display size']) &&
+             checkFilter(filters.displayType, ['display type', 'screen type']) &&
+             checkFilter(filters.processor, ['processor', 'cpu']);
     });
   }, [data, searchTerm, filters, activeCategory]);
 
-  // --- MISSING DEFINITION FIXED ---
   const activeFilterCount = Object.values(filters).filter(val => val !== '').length;
-  const resetFilters = () => setFilters({ ram: '', ssd: '', displaySize: '', displayType: '' });
+  const resetFilters = () => setFilters({ ram: '', ssd: '', displaySize: '', displayType: '', processor: '' });
 
-  if (loading) {
+  if (loading && !refreshing) {
     return (
-      <div className="min-h-screen flex flex-col items-center justify-center bg-[#f0f2f5] relative overflow-hidden">
-        <div className="absolute top-[20%] left-[20%] w-64 h-64 bg-indigo-400/30 rounded-full blur-[80px] animate-pulse"></div>
-        <div className="h-24 w-24 rounded-[28px] bg-white/40 backdrop-blur-2xl shadow-lg border border-white/60 flex flex-col items-center justify-center mb-6 relative z-10 transition-transform duration-500 ease-out hover:scale-105">
-          <Laptop className="h-8 w-8 text-indigo-600 animate-pulse drop-shadow-md" strokeWidth={2} />
-          <div className="absolute -bottom-2 -right-2 bg-white/80 backdrop-blur-md rounded-full p-1.5 shadow-sm border border-white/60">
-             <Loader2 className="h-4 w-4 text-indigo-600 animate-spin" />
-          </div>
+      <div className="min-h-screen flex flex-col items-center justify-center bg-[#f0f2f5]">
+        <div className="h-24 w-24 rounded-[32px] bg-white shadow-xl border border-white flex flex-col items-center justify-center mb-6 relative">
+          <Laptop className="h-8 w-8 text-indigo-600 animate-pulse" />
+          <Loader2 className="absolute -bottom-2 -right-2 h-6 w-6 text-indigo-600 animate-spin bg-white rounded-full p-1" />
         </div>
-        <p className="font-bold text-slate-700 text-lg tracking-tight relative z-10">Loading Laptops...</p>
+        <p className="font-bold text-slate-700 tracking-widest text-xs uppercase">Syncing Cloud Vault</p>
       </div>
     );
   }
 
   return (
-    <div className="min-h-screen bg-[#f0f2f5] text-slate-800 font-sans pb-10 select-none relative overflow-x-hidden">
-      
-      {/* Background Orbs */}
+    <div className="min-h-screen bg-[#f0f2f5] text-slate-800 font-sans pb-10 select-none relative">
+      {/* Fixed Decor Orbs */}
       <div className="fixed inset-0 pointer-events-none z-0 overflow-hidden">
-        <div className="absolute top-[-10%] left-[-10%] w-[50vw] h-[50vw] bg-indigo-400/20 rounded-full blur-[100px]"></div>
-        <div className="absolute top-[20%] right-[-10%] w-[40vw] h-[40vw] bg-cyan-400/20 rounded-full blur-[100px]"></div>
-        <div className="absolute bottom-[-10%] left-[10%] w-[60vw] h-[60vw] bg-purple-400/15 rounded-full blur-[120px]"></div>
+        <div className="absolute top-[-10%] left-[-10%] w-[50vw] h-[50vw] bg-indigo-400/10 rounded-full blur-[100px]"></div>
+        <div className="absolute bottom-[10%] right-[-10%] w-[40vw] h-[40vw] bg-purple-400/10 rounded-full blur-[100px]"></div>
       </div>
       
-      <header className="sticky top-0 z-50 bg-white/40 backdrop-blur-[40px] shadow-[0_4px_30px_rgba(0,0,0,0.05),inset_0_1px_0_rgba(255,255,255,0.6)] border-b border-white/50 px-4 pt-4 pb-2">
+      {/* 🚀 FIXED STICKY HEADER 🚀 */}
+      <header className="sticky top-0 z-[100] bg-white/60 backdrop-blur-[50px] border-b border-white/50 px-4 pt-4 pb-2 shadow-sm">
         <div className="max-w-2xl mx-auto">
-          <div className="flex items-center gap-2.5 mb-3 px-1">
-            <div className="bg-gradient-to-br from-indigo-500 to-purple-600 p-1.5 rounded-xl shadow-[0_2px_10px_rgba(99,102,241,0.4)]">
-               <Laptop size={14} className="text-white" strokeWidth={2.5} />
+          {/* Top Line */}
+          <div className="flex items-center justify-between mb-4 px-1">
+            <div className="flex items-center gap-2.5">
+              <div className="bg-gradient-to-br from-indigo-500 to-purple-600 p-1.5 rounded-xl shadow-md"><Laptop size={14} className="text-white" /></div>
+              <h1 className="font-black text-xs tracking-widest text-slate-700 uppercase">Galaxy Book</h1>
             </div>
-            <h1 className="font-bold text-xs tracking-widest text-slate-600 uppercase drop-shadow-sm">Galaxy Book</h1>
+            <div className="flex items-center gap-2">
+              {lastUpdated && !showFilters && <span className="text-[9px] font-black text-slate-400 bg-slate-100/50 px-2.5 py-1 rounded-full border border-slate-200/50 uppercase">{lastUpdated}</span>}
+              <button onClick={() => syncData(true)} disabled={refreshing} className={`p-2 bg-indigo-600 text-white rounded-full shadow-lg transition-all active:scale-90 ${refreshing ? 'animate-spin opacity-50' : ''}`}><RefreshCw size={14} strokeWidth={3} /></button>
+            </div>
           </div>
 
-          <div className="flex gap-2 relative">
+          {/* Search Bar Row */}
+          <div className="flex gap-2 mb-3">
             <div className="relative flex-grow group">
-              <Search className="absolute left-3.5 top-3 text-slate-500 group-focus-within:text-indigo-600 transition-colors" size={16} />
-              <input
-                type="text"
-                placeholder="Search models, specs..."
-                value={searchTerm}
-                onChange={(e) => setSearchTerm(e.target.value)}
-                className="w-full pl-10 pr-4 py-2.5 rounded-[20px] border border-white/60 outline-none focus:border-indigo-300 focus:bg-white/80 bg-white/50 backdrop-blur-md text-[13px] font-semibold text-slate-800 transition-all shadow-[inset_0_2px_4px_rgba(0,0,0,0.02)]"
+              <Search className="absolute left-3.5 top-3 text-slate-400" size={16} />
+              <input 
+                type="text" 
+                placeholder="Type exact model (e.g. Book 5)" 
+                value={searchTerm} 
+                onChange={(e) => setSearchTerm(e.target.value)} 
+                className="w-full pl-10 pr-4 py-2.5 rounded-2xl border border-white/80 outline-none focus:border-indigo-300 focus:bg-white bg-white/40 backdrop-blur-md text-sm font-semibold shadow-sm transition-all" 
               />
             </div>
-            
-            <button 
-              onClick={() => setShowFilters(!showFilters)}
-              className={`flex items-center justify-center w-11 h-[2.6rem] rounded-[20px] transition-all duration-300 active:scale-90 relative ${
-                showFilters || activeFilterCount > 0 
-                  ? 'bg-indigo-600/90 text-white shadow-[0_4px_15px_rgba(79,70,229,0.4)] border border-indigo-400/50' 
-                  : 'bg-white/50 backdrop-blur-md text-slate-600 shadow-sm border border-white/60 hover:bg-white/70'
-              }`}
-            >
-              <SlidersHorizontal size={16} strokeWidth={2.5} />
-              {activeFilterCount > 0 && (
-                <span className="absolute -top-1 -right-1 bg-red-500 text-white text-[9px] font-black h-4 w-4 rounded-full flex items-center justify-center border border-white/50 shadow-sm">
-                  {activeFilterCount}
-                </span>
-              )}
+            <button onClick={() => setShowFilters(!showFilters)} className={`flex items-center justify-center w-11 h-[2.6rem] rounded-2xl active:scale-90 relative transition-all ${showFilters ? 'bg-indigo-600 text-white shadow-lg' : 'bg-white text-slate-600 border border-white/80 shadow-sm'}`}>
+              <SlidersHorizontal size={16} />
+              {activeFilterCount > 0 && <span className="absolute -top-1 -right-1 bg-red-500 text-white text-[9px] font-black h-4 w-4 rounded-full flex items-center justify-center border-2 border-white shadow-md">{activeFilterCount}</span>}
             </button>
           </div>
 
-          {modelCategories.length > 0 && (
-            <div className="flex gap-2 overflow-x-auto py-3 -mx-4 px-4 scroll-smooth no-scrollbar">
-              <button
-                onClick={() => setActiveCategory('All')}
-                className={`flex-shrink-0 px-4 py-1.5 rounded-full text-[11px] font-bold transition-all duration-300 active:scale-95 ${
-                  activeCategory === 'All'
-                    ? 'bg-slate-800/90 backdrop-blur-md text-white shadow-[0_4px_15px_rgba(0,0,0,0.2)] border border-slate-700/50'
-                    : 'bg-white/50 backdrop-blur-md text-slate-600 shadow-sm border border-white/60 hover:bg-white/70'
-                }`}
-              >
-                All Models
-              </button>
-              
-              {modelCategories.map(cat => (
-                <button
-                  key={cat}
-                  onClick={() => setActiveCategory(cat)}
-                  className={`flex-shrink-0 px-4 py-1.5 rounded-full text-[11px] font-bold transition-all duration-300 active:scale-95 ${
-                    activeCategory === cat
-                      ? 'bg-slate-800/90 backdrop-blur-md text-white shadow-[0_4px_15px_rgba(0,0,0,0.2)] border border-slate-700/50'
-                      : 'bg-white/50 backdrop-blur-md text-slate-600 shadow-sm border border-white/60 hover:bg-white/70'
-                }`}
-                >
-                  {cat}
-                </button>
-              ))}
-            </div>
-          )}
+          {/* Series Tabs */}
+          <div className="flex gap-2 overflow-x-auto py-2 no-scrollbar scroll-smooth">
+            <button onClick={() => setActiveCategory('All')} className={`flex-shrink-0 px-4 py-1.5 rounded-full text-[11px] font-black border transition-all ${activeCategory === 'All' ? 'bg-slate-800 text-white border-slate-700 shadow-md' : 'bg-white/40 text-slate-600 border-white/60'}`}>All</button>
+            {modelCategories.map(cat => <button key={cat} onClick={() => setActiveCategory(cat)} className={`flex-shrink-0 px-4 py-1.5 rounded-full text-[11px] font-black border transition-all ${activeCategory === cat ? 'bg-indigo-600 text-white border-indigo-400 shadow-md' : 'bg-white/40 text-slate-600 border-white/60'}`}>{cat}</button>)}
+          </div>
 
+          {/* Filter Panel (Inline within Header) */}
           {showFilters && (
-            <div className="mt-2 p-4 bg-white/60 backdrop-blur-[30px] border border-white/60 rounded-[24px] shadow-[0_15px_40px_rgba(0,0,0,0.1)] animate-in slide-in-from-top-4 fade-in duration-300 mb-2">
-              <div className="flex justify-between items-center mb-3">
-                <span className="text-[11px] font-bold text-slate-500 uppercase tracking-widest">Filters</span>
-                {activeFilterCount > 0 && (
-                  <button onClick={resetFilters} className="text-[10px] font-bold text-red-500 bg-red-50/80 backdrop-blur-sm px-2.5 py-1 rounded-full flex items-center gap-1 shadow-sm border border-red-100/50">
-                    <X size={10} strokeWidth={3} /> Clear
-                  </button>
-                )}
+            <div className="mt-2 p-4 bg-white/90 border border-white rounded-[24px] shadow-2xl animate-in slide-in-from-top-2 duration-300 mb-3">
+              <div className="flex items-center justify-between mb-4 px-1 text-[10px] font-black text-slate-400 uppercase tracking-widest">
+                <div className="flex items-center gap-2"><span>Hardware Refinement</span></div>
+                {activeFilterCount > 0 && <button onClick={resetFilters} className="text-red-500 bg-red-50 px-2 py-1 rounded-lg">Reset</button>}
               </div>
-              <div className="grid grid-cols-2 gap-2">
+              <div className="grid grid-cols-2 gap-3">
+                <div className="col-span-2"><FilterSelect label="Processor" value={filters.processor} options={filterOptions.processor} onChange={(v) => setFilters({...filters, processor: v})} /></div>
                 <FilterSelect label="RAM" value={filters.ram} options={filterOptions.ram} onChange={(v) => setFilters({...filters, ram: v})} />
                 <FilterSelect label="SSD" value={filters.ssd} options={filterOptions.ssd} onChange={(v) => setFilters({...filters, ssd: v})} />
-                <FilterSelect label="Size" value={filters.displaySize} options={filterOptions.displaySize} onChange={(v) => setFilters({...filters, displaySize: v})} />
-                <FilterSelect label="Type" value={filters.displayType} options={filterOptions.displayType} onChange={(v) => setFilters({...filters, displayType: v})} />
               </div>
+              <button onClick={() => setShowFilters(false)} className="w-full mt-4 bg-indigo-600 text-white py-2.5 rounded-xl text-xs font-black uppercase tracking-widest shadow-lg active:scale-95 transition-all">Show {processedData.length} Results</button>
             </div>
           )}
         </div>
       </header>
 
-      <main className="relative z-10 max-w-2xl mx-auto px-4 py-4 space-y-5">
-        {error && (
-          <div className="bg-red-50/80 backdrop-blur-xl border border-red-200/60 p-4 rounded-[24px] shadow-sm flex items-start gap-3">
-            <div className="bg-red-100/80 p-2 rounded-2xl text-red-600"><ServerCrash size={18} /></div>
-            <div>
-              <p className="text-sm font-bold text-red-800">Connection Error</p>
-              <p className="text-[11px] font-medium text-red-600 mt-0.5">{error}</p>
-            </div>
-          </div>
-        )}
-
-        <div className="flex items-center justify-between px-1">
-           <p className="text-[12px] font-bold text-slate-500 tracking-wide drop-shadow-sm uppercase tracking-widest">
-             Showing <span className="text-indigo-600 font-black">{processedData.length}</span> Results
-           </p>
+      {/* Main Body */}
+      <main className="relative z-10 max-w-2xl mx-auto px-4 py-6 space-y-6">
+        <div className="flex justify-between items-center px-1">
+           <p className="text-[10px] font-black text-slate-400 tracking-widest uppercase">Inventory: <span className="text-indigo-600">{processedData.length}</span> Devices</p>
+           {(searchTerm || activeFilterCount > 0) && <button onClick={() => {setSearchTerm(''); resetFilters(); setActiveCategory('All');}} className="text-[10px] font-black text-indigo-600 underline underline-offset-4">Reset View</button>}
         </div>
 
         {processedData.length > 0 ? (
-          <div className="space-y-5">
-            {processedData.map((laptop, index) => {
-              const uniqueKey = laptop['SKU CODE'] || laptop['SKU'] || index;
-              return <LiquidGlassCard key={uniqueKey} item={laptop} />;
-            })}
+          <div className="space-y-6">
+            {processedData.map((laptop, index) => <LiquidGlassCard key={`${laptop['SKU CODE']}-${index}`} item={laptop} onToast={showToast} />)}
           </div>
         ) : (
-          <div className="text-center py-16 bg-white/40 backdrop-blur-2xl rounded-[28px] border border-white/60 shadow-lg">
-            <div className="h-16 w-16 bg-white/60 rounded-full flex items-center justify-center mx-auto mb-4 border border-white shadow-sm">
-              <AlertTriangle className="h-7 w-7 text-slate-400" strokeWidth={2} />
-            </div>
-            <p className="font-bold text-slate-700 text-lg">No Results Found</p>
-            <p className="text-sm text-slate-500 mt-1">Try another search or filter.</p>
+          <div className="text-center py-24 bg-white/40 backdrop-blur-2xl rounded-[32px] border border-white/60 shadow-xl animate-in fade-in duration-500">
+            <div className="h-16 w-16 bg-white/60 rounded-full flex items-center justify-center mx-auto mb-4 border border-white"><AlertTriangle className="h-8 w-8 text-slate-300" /></div>
+            <p className="font-bold text-slate-700 text-lg">No Exact Match Found</p>
+            <p className="text-xs text-slate-400 mt-1">Strict matching active.</p>
           </div>
         )}
       </main>
-      
+
+      {toast && <div className="fixed bottom-10 left-1/2 -translate-x-1/2 z-[200] px-6 py-3 bg-slate-900/90 backdrop-blur-xl text-white text-xs font-bold rounded-full shadow-2xl animate-in slide-in-from-bottom-4 duration-300">{toast}</div>}
       <style>{`.no-scrollbar::-webkit-scrollbar { display: none; } .no-scrollbar { -ms-overflow-style: none; scrollbar-width: none; }`}</style>
     </div>
   );
 }
 
 const FilterSelect = ({ label, value, options, onChange }) => (
-  <div className="relative">
-    <select
-      value={value}
-      onChange={(e) => onChange(e.target.value)}
-      className="w-full pl-3 pr-7 py-2.5 text-[11px] font-bold border border-white/60 rounded-[16px] outline-none bg-white/50 backdrop-blur-md text-slate-700 appearance-none transition-all shadow-[inset_0_1px_2px_rgba(0,0,0,0.02)]"
-    >
-      <option value="">{label} (All)</option>
-      {options.map((opt, i) => (
-        <option key={i} value={opt}>{opt}</option>
-      ))}
-    </select>
-    <ChevronDown size={14} className="absolute right-2.5 top-2.5 text-slate-400 pointer-events-none" />
+  <div className="relative group">
+    <select value={value} onChange={(e) => onChange(e.target.value)} className={`w-full px-4 py-2.5 text-[11px] font-black rounded-xl border transition-all appearance-none outline-none ${value ? 'bg-indigo-50 border-indigo-200 text-indigo-900' : 'bg-slate-50 border-slate-100 text-slate-600'}`}><option value="">{label} (All)</option>{options.map((opt, i) => <option key={i} value={opt}>{opt}</option>)}</select>
+    <ChevronDown size={14} className="absolute right-3 top-1/2 -translate-y-1/2 text-slate-400 pointer-events-none transition-transform duration-300" />
   </div>
 );
 
-function LiquidGlassCard({ item }) {
+function LiquidGlassCard({ item, onToast }) {
   const [expanded, setExpanded] = useState(false);
   const [useBankOffer, setUseBankOffer] = useState(false);
   const [useUpgrade, setUseUpgrade] = useState(false);
 
+  const colors = (item['Color'] || '').split(',').map(c => c.trim()).filter(Boolean);
   const name = item['Marketing Name'] || item['Model'] || 'Unknown Device';
   const sku = item['SKU CODE'] || item['SKU'] || 'N/A';
   
-  const mop = parsePrice(item['MOP']);
-  const support = parsePrice(item['Support'] || item['Sellout Support']);
-  const bankCb = parsePrice(item['Bank CB- HDFC'] || item['Bank CB']);
-  const upgrade = parsePrice(item['Upgrade'] || item['Exchange']);
-
-  const basePrice = Math.max(0, mop - support);
-  let offerPrice = basePrice;
+  const mop = parsePrice(item['MOP']), support = parsePrice(item['Support'] || item['Sellout Support']), bankCb = parsePrice(item['Bank CB- HDFC'] || item['Bank CB']), upgrade = parsePrice(item['Upgrade'] || item['Exchange']);
+  let offerPrice = Math.max(0, mop - support);
   if (useBankOffer) offerPrice -= bankCb;
   if (useUpgrade) offerPrice -= upgrade;
 
   const getShareText = () => {
-    let text = `*Galaxy Book Quote*\n--------------------------\n*Model:* ${name}\n*SKU:* ${sku}\n\n`;
-    text += `MOP Price: ₹${formatINR(mop)}\n`;
-    if(support > 0) text += `Store Support: -₹${formatINR(support)}\n`;
-    if(useBankOffer) text += `Bank Offer: -₹${formatINR(bankCb)}\n`;
-    if(useUpgrade) text += `Upgrade Offer: -₹${formatINR(upgrade)}\n`;
-    text += `\n*OFFER PRICE: ₹${formatINR(offerPrice)}*\n--------------------------\n*Specifications:*\n`;
-    Object.entries(item).forEach(([k, v]) => {
-      if(v && v !== 'N/A' && !['Marketing Name', 'MOP', 'Support', 'Bank CB- HDFC', 'Upgrade', 'SKU CODE', 'Color'].includes(k)) {
-         text += `• ${k}: ${v}\n`;
-      }
-    });
+    let text = `*Galaxy Book Quotation*\n--------------------------\n*Model:* ${name}\n*SKU:* ${sku}\n\n`;
+    text += `MOP: ₹${formatINR(mop)}\nStore Support: -₹${formatINR(support)}\nBank Offer: -₹${formatINR(bankCb)}\nUpgrade Bonus: -₹${formatINR(upgrade)}\n\n*FINAL PRICE: ₹${formatINR(offerPrice)}*\n--------------------------\n`;
+    Object.entries(item).forEach(([k, v]) => { if(v && v !== 'N/A' && !['Marketing Name', 'MOP', 'Support', 'Bank CB- HDFC', 'Upgrade', 'SKU CODE', 'Color'].some(key => k.toLowerCase().includes(key.toLowerCase()))) text += `• ${k}: ${v}\n`; });
     return text;
   };
 
-  const handleCopy = () => copyToClipboard(getShareText(), 'Quote Copied!');
-  const handleShare = async () => {
-    const text = `*Galaxy Book: ${name}*\nSKU: ${sku}\n*Offer Price: ₹${formatINR(offerPrice)}*`;
-    if (navigator.share) {
-      try { await navigator.share({ title: 'Galaxy Book Details', text }); } catch (e) { handleCopy(); }
-    } else {
-      handleCopy();
-    }
-  };
-
   return (
-    <div className="bg-white/40 backdrop-blur-[40px] rounded-[28px] shadow-[0_12px_40px_rgba(0,0,0,0.06),inset_0_1px_1px_rgba(255,255,255,0.9)] border border-white/50 transition-all duration-500 ease-out active:scale-[0.98] overflow-hidden relative">
-      <div className="absolute top-0 left-0 right-0 h-24 bg-gradient-to-b from-white/50 to-transparent pointer-events-none"></div>
-      <div className="p-4 pb-2 flex gap-3 items-start relative z-10">
-        <div className="h-14 w-14 bg-white/60 backdrop-blur-md rounded-[18px] shadow-[0_4px_8px_rgba(0,0,0,0.05)] border border-white flex items-center justify-center flex-shrink-0">
-           <Laptop className="h-6 w-6 text-indigo-600 drop-shadow-sm" strokeWidth={2} />
-        </div>
+    <div className="bg-white/40 backdrop-blur-[40px] rounded-[32px] shadow-[0_12px_40px_rgba(0,0,0,0.06),inset_0_1px_1px_rgba(255,255,255,0.9)] border border-white/50 transition-all duration-500 overflow-hidden relative">
+      <div className="p-5 pb-2 flex gap-4 items-start relative z-10">
+        <div className="h-16 w-16 bg-white/60 backdrop-blur-md rounded-[24px] shadow-sm border border-white flex items-center justify-center flex-shrink-0"><Laptop className="h-7 w-7 text-indigo-600" /></div>
         <div className="flex-grow min-w-0 pt-1">
-          <p className="text-[10px] font-black text-indigo-600/80 uppercase tracking-[0.15em] mb-0.5 select-text cursor-text">{sku}</p>
-          <h2 className="text-[16px] font-black text-slate-800 leading-tight pr-1 line-clamp-2">{name}</h2>
-          <p className="text-[11px] font-bold text-slate-500 mt-1 truncate">{item['RAM']} | {item['SSD']}</p>
+          <p onClick={() => copyToClipboard(sku, () => onToast('SKU Copied'))} className="text-[10px] font-black text-indigo-500 uppercase tracking-[0.2em] mb-0.5 select-text cursor-pointer hover:underline">{sku}</p>
+          <h2 className="text-[17px] font-black text-slate-800 leading-tight pr-1 line-clamp-2">{name}</h2>
+          <p className="text-[11px] font-bold text-slate-400 mt-2 truncate">{item['Processor']} | {item['RAM']} | {item['SSD']}</p>
         </div>
       </div>
 
-      <div className="px-4 pb-3 relative z-10">
-        <div className="bg-white/30 backdrop-blur-md rounded-[24px] p-3 border border-white/40 shadow-[inset_0_2px_10px_rgba(0,0,0,0.02)]">
-          <div className="flex justify-between items-center mb-2 px-1 text-[10px] font-bold uppercase tracking-widest">
-            <div><span className="text-slate-500">MOP</span><span className={`block text-[14px] font-black mt-0.5 ${support > 0 ? 'line-through text-slate-400' : 'text-slate-800'}`}>₹{formatINR(mop)}</span></div>
-            {support > 0 && <div className="text-right text-emerald-600"><span>Support</span><span className="block text-[14px] font-black mt-0.5">-₹{formatINR(support)}</span></div>}
+      <div className="px-5 pb-4 relative z-10">
+        <div className="bg-white/30 backdrop-blur-md rounded-[28px] p-4 border border-white/40 shadow-[inset_0_2px_10px_rgba(0,0,0,0.02)]">
+          <div className="flex justify-between items-center mb-3 px-1 text-[10px] font-black uppercase tracking-widest">
+            <div><span className="text-slate-400">MOP</span><span className={`block text-[15px] font-black mt-0.5 ${support > 0 ? 'line-through text-slate-400' : 'text-slate-800'}`}>₹{formatINR(mop)}</span></div>
+            {support > 0 && <div className="text-right text-emerald-500"><span>Support</span><span className="block text-[15px] font-black mt-0.5">-₹{formatINR(support)}</span></div>}
           </div>
-
-          <div className="flex flex-col gap-1.5">
-            {bankCb > 0 && <button onClick={() => setUseBankOffer(!useBankOffer)} className={`w-full flex items-center justify-between px-3 py-2.5 rounded-[16px] text-[12px] font-bold transition-all duration-400 ease-out active:scale-95 ${useBankOffer ? 'bg-blue-500/90 backdrop-blur-md text-white shadow-[0_4px_15px_rgba(59,130,246,0.3)] border border-blue-400/50' : 'bg-white/60 backdrop-blur-sm text-slate-700 shadow-sm border border-white hover:bg-white/80'}`}>
-              <div className="flex items-center gap-2">
-                <CreditCard size={14} className={useBankOffer ? 'text-blue-100' : 'text-slate-500'} />
-                <span>Bank Cashback</span>
-              </div>
-              <div className="flex items-center gap-1.5">
-                <span className={useBankOffer ? 'text-white' : 'text-blue-700'}>-₹{formatINR(bankCb)}</span>
-                {useBankOffer ? <CheckCircle2 size={14} fill="white" className="text-blue-500"/> : <Circle size={14} className="text-slate-300"/>}
-              </div>
-            </button>}
-            {upgrade > 0 && <button onClick={() => setUseUpgrade(!useUpgrade)} className={`w-full flex items-center justify-between px-3 py-2.5 rounded-[16px] text-[12px] font-bold transition-all duration-400 ease-out active:scale-95 ${useUpgrade ? 'bg-orange-500/90 backdrop-blur-md text-white shadow-[0_4px_15px_rgba(249,115,22,0.3)] border border-orange-400/50' : 'bg-white/60 backdrop-blur-sm text-slate-700 shadow-sm border border-white hover:bg-white/80'}`}>
-              <div className="flex items-center gap-2">
-                <Tag size={14} className={useUpgrade ? 'text-orange-100' : 'text-slate-500'} />
-                <span>Upgrade Bonus</span>
-              </div>
-              <div className="flex items-center gap-1.5">
-                <span className={useUpgrade ? 'text-white' : 'text-orange-700'}>-₹{formatINR(upgrade)}</span>
-                {useUpgrade ? <CheckCircle2 size={14} fill="white" className="text-orange-500"/> : <Circle size={14} className="text-slate-300"/>}
-              </div>
-            </button>}
+          <div className="flex flex-col gap-2">
+            {bankCb > 0 && <button onClick={() => setUseBankOffer(!useBankOffer)} className={`w-full flex items-center justify-between px-4 py-3 rounded-[18px] text-[12px] font-black transition-all ${useBankOffer ? 'bg-blue-600 text-white shadow-lg border border-blue-400' : 'bg-white/60 text-slate-700 border border-white'}`}><div className="flex items-center gap-2.5"><CreditCard size={14} className={useBankOffer ? 'text-blue-100' : 'text-slate-400'} /><span>Bank Offer</span></div><div className="flex items-center gap-2"><span>-₹{formatINR(bankCb)}</span>{useBankOffer ? <CheckCircle2 size={16} fill="white" className="text-blue-600"/> : <Circle size={16} className="text-slate-300"/>}</div></button>}
+            {upgrade > 0 && <button onClick={() => setUseUpgrade(!useUpgrade)} className={`w-full flex items-center justify-between px-4 py-3 rounded-[18px] text-[12px] font-black transition-all ${useUpgrade ? 'bg-orange-500 text-white shadow-lg border border-orange-400' : 'bg-white/60 text-slate-700 border border-white'}`}><div className="flex items-center gap-2.5"><Tag size={14} className={useUpgrade ? 'text-orange-100' : 'text-slate-400'} /><span>Upgrade</span></div><div className="flex items-center gap-2"><span>-₹{formatINR(upgrade)}</span>{useUpgrade ? <CheckCircle2 size={16} fill="white" className="text-orange-500"/> : <Circle size={16} className="text-slate-300"/>}</div></button>}
           </div>
-
-          <div className="mt-3 bg-gradient-to-br from-indigo-600 to-purple-700 rounded-[20px] px-4 py-3 flex items-center justify-between text-white shadow-lg">
-            <div><span className="text-[9px] font-black text-indigo-100 uppercase tracking-[0.2em] block mb-0.5">Offer Price</span><span className="text-xl font-black tracking-tight">₹{formatINR(offerPrice)}</span></div>
-            <div className="h-9 w-9 bg-white/20 rounded-full flex items-center justify-center backdrop-blur-md shadow-[inset_0_1px_1px_rgba(255,255,255,0.4)]"><Laptop size={16} className="text-white" /></div>
+          <div className="mt-4 bg-gradient-to-br from-indigo-600 to-purple-700 rounded-[22px] px-5 py-4 flex items-center justify-between text-white shadow-lg border border-indigo-400/30">
+            <div><span className="text-[10px] font-black text-indigo-100 uppercase tracking-[0.2em] block mb-0.5">Offer Price</span><span className="text-2xl font-black tracking-tight">₹{formatINR(offerPrice)}</span></div>
+            <Laptop size={20} className="opacity-30" />
           </div>
         </div>
       </div>
 
-      <div className="px-4 pb-4 flex justify-between items-center relative z-10">
-        <span className="text-[10px] font-bold text-slate-400 ml-1 italic opacity-60">Select SKU text to copy</span>
-        <div className="flex gap-1.5">
-          {navigator.share && <button onClick={handleShare} className="h-8 w-8 bg-white/60 backdrop-blur-md border border-white shadow-sm rounded-[10px] flex items-center justify-center text-slate-600 active:scale-90 transition-all"><Share2 size={13} /></button>}
-          <button onClick={handleCopy} className="h-8 w-8 bg-white/60 backdrop-blur-md border border-white shadow-sm rounded-[10px] flex items-center justify-center text-slate-600 active:scale-90 transition-all"><Copy size={13} /></button>
-          <button onClick={() => setExpanded(!expanded)} className="flex items-center gap-1.5 px-3 h-8 rounded-[12px] text-[10px] font-bold text-slate-700 bg-white/60 backdrop-blur-md border border-white shadow-sm active:scale-90 transition-all">{expanded ? 'Hide' : 'Specs'}<ChevronDown size={14} className={`transition-transform duration-400 ease-out ${expanded ? 'rotate-180' : ''}`} /></button>
+      <div className="px-6 pb-6 flex justify-between items-center relative z-10">
+        <div className="flex gap-1.5 overflow-x-auto no-scrollbar max-w-[50%]">{colors.length > 0 ? colors.map((c, i) => <span key={i} className="px-2.5 py-1 bg-white/50 border border-white rounded-[10px] text-[9px] font-black text-slate-500 uppercase tracking-tighter">{c}</span>) : <span className="text-[9px] text-slate-400 font-bold ml-1 uppercase">Standard</span>}</div>
+        <div className="flex gap-2">
+          <button onClick={() => copyToClipboard(getShareText(), () => onToast('Quotation Copied'))} className="h-10 w-10 bg-white/60 border border-white rounded-[16px] flex items-center justify-center text-slate-600 active:scale-90"><Copy size={16} /></button>
+          <button onClick={() => setExpanded(!expanded)} className="flex items-center gap-2 px-4 h-10 rounded-[16px] text-[11px] font-black text-slate-700 bg-white/60 border border-white active:scale-90">{expanded ? 'Hide' : 'Specs'}<ChevronDown size={16} className={`transition-transform ${expanded ? 'rotate-180' : ''}`} /></button>
         </div>
       </div>
-
       {expanded && (
-        <div className="px-5 pb-5 pt-2 bg-white/20 border-t border-white/40 backdrop-blur-md relative z-10">
-          <div className="grid grid-cols-1 gap-1.5 mt-1">
-            {Object.entries(item).map(([key, value], idx) => {
-              const hideKeys = ['Marketing Name', 'Model', 'Name', 'MOP', 'Support', 'Bank CB- HDFC', 'Bank CB', 'Upgrade', 'Color', 'SKU CODE'];
-              if (!value || value === 'N/A' || hideKeys.some(k => key.toLowerCase().includes(k.toLowerCase()))) return null;
-              return <div key={idx} className="flex justify-between border-b border-slate-300/30 pb-1.5 pt-1 last:border-0"><span className="text-[10px] font-bold text-slate-500 tracking-wide">{key}</span><span className="text-[10px] font-black text-slate-800 text-right w-2/3 truncate">{value}</span></div>;
+        <div className="px-6 pb-6 pt-2 bg-white/20 border-t border-white/40 backdrop-blur-md">
+          <div className="grid grid-cols-1 gap-2 mt-2">
+            {Object.entries(item).map(([k, v], i) => {
+              if (!v || v === 'N/A' || ['Marketing Name', 'Model', 'Name', 'MOP', 'Support', 'Bank CB', 'Upgrade', 'Color', 'SKU CODE'].some(key => k.toLowerCase().includes(key.toLowerCase()))) return null;
+              return <div key={i} className="flex justify-between border-b border-slate-300/20 pb-1.5 pt-1 last:border-0"><span className="text-[10px] font-bold text-slate-500 uppercase tracking-widest">{k}</span><span className="text-[11px] font-black text-slate-800 text-right w-2/3 truncate">{v}</span></div>;
             })}
           </div>
         </div>
