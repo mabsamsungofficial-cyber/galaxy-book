@@ -1,19 +1,9 @@
-import React, { useState, useEffect, useMemo, useRef } from 'react';
+import React, { useState, useEffect, useMemo } from 'react';
 import { 
-  Search, Laptop, ChevronDown, ChevronUp, AlertTriangle, 
+  Search, Laptop, ChevronDown, AlertTriangle, 
   Loader2, CreditCard, Copy, Share2, ServerCrash, 
   CheckCircle2, Circle, SlidersHorizontal, X, Tag, Filter, RefreshCw
 } from 'lucide-react';
-import { initializeApp } from 'firebase/app';
-import { getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged } from 'firebase/auth';
-import { getFirestore, doc, setDoc, getDoc } from 'firebase/firestore';
-
-// --- Firebase Configuration ---
-const firebaseConfig = JSON.parse(__firebase_config);
-const app = initializeApp(firebaseConfig);
-const auth = getAuth(app);
-const db = getFirestore(app);
-const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
 
 // --- Utility Functions ---
 
@@ -66,7 +56,6 @@ export default function App() {
   const [refreshing, setRefreshing] = useState(false);
   const [error, setError] = useState(null);
   const [toast, setToast] = useState(null);
-  const [user, setUser] = useState(null);
   const [lastUpdated, setLastUpdated] = useState(null);
   
   const [searchTerm, setSearchTerm] = useState('');
@@ -76,23 +65,7 @@ export default function App() {
 
   const showToast = (message) => { setToast(message); setTimeout(() => setToast(null), 2000); };
 
-  // Rule 3: Auth first
-  useEffect(() => {
-    const initAuth = async () => {
-      try {
-        if (typeof __initial_auth_token !== 'undefined' && __initial_auth_token) { 
-          await signInWithCustomToken(auth, __initial_auth_token); 
-        } else { 
-          await signInAnonymously(auth); 
-        }
-      } catch (err) { console.error("Auth Error:", err); }
-    };
-    initAuth();
-    const unsubscribe = onAuthStateChanged(auth, setUser);
-    return () => unsubscribe();
-  }, []);
-
-  // UI Protection
+  // Browser Security & UI Setup
   useEffect(() => {
     const handleContextMenu = (e) => e.preventDefault();
     const handleKeyDown = (e) => {
@@ -106,17 +79,17 @@ export default function App() {
     return () => { document.removeEventListener('contextmenu', handleContextMenu); document.removeEventListener('keydown', handleKeyDown); };
   }, []);
 
+  // Fetch Logic (Optimized, No Firebase)
   const syncData = async (isManual = false) => {
-    if (!auth.currentUser) return;
     if (isManual) setRefreshing(true); else setLoading(true);
-    
-    // Rule 1: Strict Paths
-    const cacheDocRef = doc(db, 'artifacts', appId, 'public', 'data', 'inventoryCache', 'latest');
+    setError(null);
     
     try {
       const response = await fetch('https://docs.google.com/spreadsheets/d/122AONXEgWNyc4EnWupTeLMwrLbbXsFy2/export?format=csv&gid=1160082038');
+      if (!response.ok) throw new Error('Failed to load data. Please check your internet connection.');
       const text = await response.text();
       const rows = parseCSV(text);
+      
       if (rows.length > 1) {
         const headers = rows[0] || [];
         const jsonData = rows.slice(1).map(row => {
@@ -131,25 +104,22 @@ export default function App() {
         });
         const validData = jsonData.filter(item => item['Marketing Name'] || item['SKU CODE']);
         
-        await setDoc(cacheDocRef, { data: JSON.stringify(validData), timestamp: new Date().toISOString() });
         setData(validData);
         setLastUpdated(new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }));
         if (isManual) showToast('Inventory Refreshed');
-        setError(null);
       }
     } catch (err) {
-      const cacheSnap = await getDoc(cacheDocRef);
-      if (cacheSnap.exists()) {
-        const cached = cacheSnap.data();
-        setData(JSON.parse(cached.data));
-        setLastUpdated(new Date(cached.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }));
-        showToast('Using Offline Cache');
-        setError(null);
-      } else { setError('Connection failed.'); }
-    } finally { setLoading(false); setRefreshing(false); }
+      setError(err.message || 'Network Error. Failed to fetch data.');
+    } finally { 
+      setLoading(false); 
+      setRefreshing(false); 
+    }
   };
 
-  useEffect(() => { if (user) syncData(); }, [user]);
+  // Fetch initially on mount
+  useEffect(() => { 
+    syncData(); 
+  }, []);
 
   const modelCategories = useMemo(() => {
     if (!Array.isArray(data)) return [];
@@ -216,22 +186,20 @@ export default function App() {
   const activeFilterCount = Object.values(filters).filter(val => val !== '').length;
   const resetFilters = () => setFilters({ ram: '', ssd: '', displaySize: '', displayType: '', processor: '' });
 
-  // Loading State - Dark Mesh Theme
   if (loading && !refreshing) {
     return (
       <div className="relative min-h-screen w-full bg-[#050505] text-white/90 overflow-hidden font-sans flex flex-col items-center justify-center">
         <div className="absolute inset-0 overflow-hidden pointer-events-none z-0">
-          <div className="absolute inset-0" style={{ backgroundColor: '#030305', backgroundImage: 'radial-gradient(circle at 50% 0%, rgba(99, 102, 241, 0.15) 0%, transparent 70%), linear-gradient(to right, rgba(255,255,255,0.03) 1px, transparent 1px), linear-gradient(to bottom, rgba(255,255,255,0.03) 1px, transparent 1px)', backgroundSize: '100% 100%, 32px 32px, 32px 32px', backgroundPosition: '0 0, 0 0, 0 0' }}></div>
-          <div className="absolute top-[-20%] left-[-10%] w-[600px] h-[600px] bg-indigo-600/20 rounded-full blur-[120px] mix-blend-screen animate-pulse" style={{ animationDuration: '8s' }}></div>
-          <div className="absolute bottom-[-10%] right-[-10%] w-[500px] h-[500px] bg-fuchsia-600/20 rounded-full blur-[100px] mix-blend-screen animate-pulse" style={{ animationDuration: '10s' }}></div>
-          <div className="absolute top-[40%] right-[20%] w-[300px] h-[300px] bg-cyan-500/10 rounded-full blur-[80px] mix-blend-screen"></div>
+          <div className="absolute inset-0" style={{ backgroundColor: '#0a0a0a', backgroundImage: 'radial-gradient(circle at 60% 40%, rgba(255,255,255,0.1) 0%, transparent 50%), radial-gradient(rgba(255,255,255,0.05) 1px, transparent 1px)', backgroundSize: '100% 100%, 6px 6px', backgroundPosition: '0 0, 0 0' }}></div>
+          <div className="absolute top-[-10%] left-[-10%] w-[500px] h-[500px] bg-cyan-500/20 rounded-full blur-[100px] mix-blend-screen"></div>
+          <div className="absolute bottom-1/4 right-[-20%] w-[500px] h-[500px] bg-blue-600/20 rounded-full blur-[100px] mix-blend-screen"></div>
         </div>
         <div className="relative z-10 flex flex-col items-center">
           <div className="bg-white/10 backdrop-blur-2xl border border-white/20 rounded-[28px] shadow-[0_8px_32px_rgba(0,0,0,0.4)] h-24 w-24 flex flex-col items-center justify-center mb-6 relative">
             <Laptop className="h-8 w-8 text-white animate-pulse" />
             <Loader2 className="absolute -bottom-2 -right-2 h-6 w-6 text-white animate-spin bg-white/10 backdrop-blur-md rounded-full p-1 border border-white/20" />
           </div>
-          <p className="text-[10px] font-bold text-white/70 uppercase tracking-widest mb-2">Syncing Cloud Vault</p>
+          <p className="text-[10px] font-bold text-white/70 uppercase tracking-widest mb-2">Fetching Inventory</p>
         </div>
       </div>
     );
@@ -239,21 +207,16 @@ export default function App() {
 
   return (
     <div className="relative min-h-screen w-full bg-[#050505] text-white/90 overflow-hidden font-sans">
-      {/* 1. Main Background & Ambient Lights */}
       <div className="absolute inset-0 overflow-hidden pointer-events-none z-0">
-        <div className="absolute inset-0" style={{ backgroundColor: '#030305', backgroundImage: 'radial-gradient(circle at 50% 0%, rgba(99, 102, 241, 0.15) 0%, transparent 70%), linear-gradient(to right, rgba(255,255,255,0.03) 1px, transparent 1px), linear-gradient(to bottom, rgba(255,255,255,0.03) 1px, transparent 1px)', backgroundSize: '100% 100%, 32px 32px, 32px 32px', backgroundPosition: '0 0, 0 0, 0 0' }}></div>
-        <div className="absolute top-[-20%] left-[-10%] w-[600px] h-[600px] bg-indigo-600/20 rounded-full blur-[120px] mix-blend-screen animate-pulse" style={{ animationDuration: '8s' }}></div>
-        <div className="absolute bottom-[-10%] right-[-10%] w-[500px] h-[500px] bg-fuchsia-600/20 rounded-full blur-[100px] mix-blend-screen animate-pulse" style={{ animationDuration: '10s' }}></div>
-        <div className="absolute top-[40%] right-[20%] w-[300px] h-[300px] bg-cyan-500/10 rounded-full blur-[80px] mix-blend-screen"></div>
+        <div className="absolute inset-0" style={{ backgroundColor: '#0a0a0a', backgroundImage: 'radial-gradient(circle at 60% 40%, rgba(255,255,255,0.1) 0%, transparent 50%), radial-gradient(rgba(255,255,255,0.05) 1px, transparent 1px)', backgroundSize: '100% 100%, 6px 6px', backgroundPosition: '0 0, 0 0' }}></div>
+        <div className="absolute top-[-10%] left-[-10%] w-[500px] h-[500px] bg-cyan-500/20 rounded-full blur-[100px] mix-blend-screen"></div>
+        <div className="absolute bottom-1/4 right-[-20%] w-[500px] h-[500px] bg-blue-600/20 rounded-full blur-[100px] mix-blend-screen"></div>
       </div>
       
-      {/* Scrollable Main Area */}
       <div className="relative z-10 h-screen w-full overflow-y-auto overflow-x-hidden pb-10">
         <div className="max-w-2xl mx-auto flex flex-col p-4 space-y-6">
           
-          {/* Header */}
           <header className="sticky top-0 z-[100] bg-black/40 backdrop-blur-[50px] border border-white/10 rounded-[28px] shadow-[0_8px_32px_rgba(0,0,0,0.4)] p-5">
-            {/* Top Line */}
             <div className="flex items-center justify-between mb-5">
               <div className="flex items-center gap-3">
                 <div className="bg-white/10 border border-white/20 p-2 rounded-[16px] shadow-inner"><Laptop size={16} className="text-white" /></div>
@@ -268,7 +231,6 @@ export default function App() {
               </div>
             </div>
 
-            {/* Search Bar Row */}
             <div className="flex gap-2 mb-4">
               <div className="relative flex-grow group">
                 <Search className="absolute left-4 top-1/2 -translate-y-1/2 text-white/70" size={16} />
@@ -286,13 +248,11 @@ export default function App() {
               </button>
             </div>
 
-            {/* Series Tabs */}
             <div className="flex gap-2 overflow-x-auto pb-1 no-scrollbar scroll-smooth">
               <button onClick={() => setActiveCategory('All')} className={`px-4 py-2 rounded-full transition-colors font-bold text-[12px] shadow-sm flex-shrink-0 ${activeCategory === 'All' ? 'bg-white text-black shadow-[0_0_20px_rgba(255,255,255,0.2)]' : 'bg-white/10 border border-white/20 text-white hover:bg-white/20'}`}>All Models</button>
               {modelCategories.map(cat => <button key={cat} onClick={() => setActiveCategory(cat)} className={`px-4 py-2 rounded-full transition-colors font-bold text-[12px] shadow-sm flex-shrink-0 ${activeCategory === cat ? 'bg-white text-black shadow-[0_0_20px_rgba(255,255,255,0.2)]' : 'bg-white/10 border border-white/20 text-white hover:bg-white/20'}`}>{cat}</button>)}
             </div>
 
-            {/* Filter Panel */}
             {showFilters && (
               <div className="mt-4 bg-white/5 backdrop-blur-md border border-white/10 rounded-[20px] p-5 shadow-[0_8px_32px_rgba(0,0,0,0.4)] animate-in slide-in-from-top-2 duration-300">
                 <div className="flex items-center justify-between mb-4">
@@ -320,7 +280,6 @@ export default function App() {
             )}
           </header>
 
-          {/* Main Body */}
           <main className="space-y-6">
             <div className="flex justify-between items-center px-1">
                <p className="text-[10px] font-bold text-white/70 uppercase tracking-widest mb-2">Inventory: {processedData.length} Devices</p>
@@ -350,7 +309,6 @@ export default function App() {
         </div>
       </div>
       
-      {/* Toast */}
       {toast && <div className="fixed bottom-10 left-1/2 -translate-x-1/2 z-[200] px-6 py-3 bg-white/10 backdrop-blur-2xl border border-white/20 text-white text-[14px] font-bold rounded-full shadow-[0_8px_32px_rgba(0,0,0,0.4)] animate-in slide-in-from-bottom-4 duration-300">{toast}</div>}
       <style>{`.no-scrollbar::-webkit-scrollbar { display: none; } .no-scrollbar { -ms-overflow-style: none; scrollbar-width: none; }`}</style>
     </div>
@@ -398,7 +356,6 @@ function LiquidGlassCard({ item, onToast }) {
   return (
     <div className="bg-white/10 backdrop-blur-2xl border border-white/20 rounded-[28px] shadow-[0_8px_32px_rgba(0,0,0,0.4)] overflow-hidden relative transition-all duration-300">
       
-      {/* Top Section */}
       <div className="p-5 flex gap-4 items-start relative z-10">
         <div className="h-16 w-16 bg-white/5 backdrop-blur-md border border-white/10 rounded-[20px] flex items-center justify-center flex-shrink-0">
           <Laptop className="h-8 w-8 text-white/70" />
@@ -410,7 +367,6 @@ function LiquidGlassCard({ item, onToast }) {
         </div>
       </div>
 
-      {/* Pricing Box */}
       <div className="px-5 pb-5 relative z-10">
         <div className="bg-white/5 backdrop-blur-md border border-white/10 rounded-[20px] p-4">
           <div className="flex justify-between items-center mb-4 px-1">
@@ -439,7 +395,6 @@ function LiquidGlassCard({ item, onToast }) {
             )}
           </div>
           
-          {/* Final Price Highlight */}
           <div className="bg-white/10 backdrop-blur-md border border-white/20 rounded-[20px] px-5 py-4 flex items-center justify-between shadow-[0_8px_32px_rgba(0,0,0,0.4)]">
             <div>
               <p className="text-[10px] font-bold text-cyan-400 uppercase tracking-widest mb-1">Final Price</p>
@@ -452,7 +407,6 @@ function LiquidGlassCard({ item, onToast }) {
         </div>
       </div>
 
-      {/* Action Buttons */}
       <div className="px-5 pb-5 flex justify-between items-center relative z-10">
         <div className="flex gap-2 overflow-x-auto no-scrollbar max-w-[50%]">
           {colors.length > 0 ? colors.map((c, i) => (
@@ -466,7 +420,6 @@ function LiquidGlassCard({ item, onToast }) {
         </div>
       </div>
 
-      {/* Expanded Specs */}
       {expanded && (
         <div className="px-6 pb-6 pt-4 bg-white/5 border-t border-white/10 backdrop-blur-md">
           <div className="grid grid-cols-1 gap-3">
