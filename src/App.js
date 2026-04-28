@@ -214,9 +214,10 @@ export default function App() {
       </div>
       
       <div className="relative z-10 h-screen w-full overflow-y-auto overflow-x-hidden pb-10">
-        <div className="max-w-2xl mx-auto flex flex-col p-4 space-y-6">
-          
-          <header className="sticky top-0 z-[100] bg-black/40 backdrop-blur-[50px] border border-white/10 rounded-[28px] shadow-[0_8px_32px_rgba(0,0,0,0.4)] p-5">
+        
+        {/* FULL WIDTH DISTINCT HEADER */}
+        <header className="sticky top-0 z-[100] w-full bg-[#020202]/70 backdrop-blur-[40px] border-b border-white/10 shadow-[0_10px_40px_rgba(0,0,0,0.8)]">
+          <div className="max-w-2xl mx-auto px-4 pt-5 pb-3">
             <div className="flex items-center justify-between mb-5">
               <div className="flex items-center gap-3">
                 <div className="bg-white/10 border border-white/20 p-2 rounded-[16px] shadow-inner"><Laptop size={16} className="text-white" /></div>
@@ -278,11 +279,12 @@ export default function App() {
                 </button>
               </div>
             )}
-          </header>
+          </div>
+        </header>
 
-          <main className="space-y-6">
-            <div className="flex justify-between items-center px-1">
-               <p className="text-[10px] font-bold text-white/70 uppercase tracking-widest mb-2">Inventory: {processedData.length} Devices</p>
+        <main className="max-w-2xl mx-auto px-4 py-6 space-y-6">
+          <div className="flex justify-between items-center px-1">
+             <p className="text-[10px] font-bold text-white/70 uppercase tracking-widest mb-2">Inventory: {processedData.length} Devices</p>
                {(searchTerm || activeFilterCount > 0) && <button onClick={() => {setSearchTerm(''); resetFilters(); setActiveCategory('All');}} className="text-[10px] font-bold text-cyan-400 uppercase tracking-widest hover:underline">Reset View</button>}
             </div>
 
@@ -301,12 +303,11 @@ export default function App() {
               <div className="text-center py-24 bg-white/10 backdrop-blur-2xl border border-white/20 rounded-[28px] shadow-[0_8px_32px_rgba(0,0,0,0.4)] animate-in fade-in duration-500">
                 <div className="h-16 w-16 bg-white/5 border border-white/10 rounded-full flex items-center justify-center mx-auto mb-4"><AlertTriangle className="h-8 w-8 text-white/50" /></div>
                 <p className="text-[24px] font-bold text-white mb-2 drop-shadow-md">No Exact Match</p>
-                <p className="text-[10px] font-bold text-white/70 uppercase tracking-widest">Strict matching active</p>
-              </div>
-            )}
-          </main>
+            <p className="text-[10px] font-bold text-white/70 uppercase tracking-widest">Strict matching active</p>
+          </div>
+        )}
+        </main>
 
-        </div>
       </div>
       
       {toast && <div className="fixed bottom-10 left-1/2 -translate-x-1/2 z-[200] px-6 py-3 bg-white/10 backdrop-blur-2xl border border-white/20 text-white text-[14px] font-bold rounded-full shadow-[0_8px_32px_rgba(0,0,0,0.4)] animate-in slide-in-from-bottom-4 duration-300">{toast}</div>}
